@@ -632,38 +632,253 @@ def get_motherboard_info() -> Dict[str, str]:
     
     return info
 
+import ctypes
+from ctypes import wintypes
+from typing import Dict, List
+import platform
+
 def get_monitor_info() -> Dict[str, str]:
-    """Информация о мониторах"""
+    """Информация о мониторах с использованием Windows API"""
     print("🔍 Получение информации о мониторах...")
     info = {}
+    
+    if platform.system() != "Windows":
+        info['Ошибка'] = "Функция поддерживается только на Windows"
+        return info
+    
     try:
-        if platform.system() == "Windows":
-            monitors = run_command('wmic desktopmonitor get name,screenwidth,screenheight /format:list')
-            monitor_list = monitors.split('\n\n')
-            
-            for i, monitor in enumerate(monitor_list):
-                if monitor.strip():
-                    lines = monitor.strip().split('\n')
-                    monitor_info = {}
-                    for line in lines:
-                        if '=' in line:
-                            key, value = line.split('=', 1)
-                            monitor_info[key.strip()] = value.strip()
-                    import ctypes
-
-                    user32 = ctypes.windll.user32
-                    width = user32.GetSystemMetrics(0)  # SM_CXSCREEN
-                    height = user32.GetSystemMetrics(1) # SM_CYSCREEN
-
-                    name = monitor_info.get('Name', 'Неизвестно')
-                    
-                    info[f'Монитор {i+1}'] = f"{name}"
-                    info[f'  Разрешение'] = f"{width}x{height}"
+        # Определяем структуры и функции Windows API
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG)
+            ]
         
+        class MONITORINFOEX(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", wintypes.DWORD),
+                ("szDevice", wintypes.WCHAR * 32)
+            ]
+            
+        # Получаем дескрипторы мониторов
+        def callback(hmonitor, hdc, lprect, lparam):
+            monitors.append(hmonitor)
+            return 1
+        
+        # Импортируем необходимые функции
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        
+        EnumDisplayMonitors = user32.EnumDisplayMonitors
+        GetMonitorInfo = user32.GetMonitorInfoW
+        
+        monitors = []
+        MonitorEnumProc = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            wintypes.HMONITOR,
+            wintypes.HDC,
+            ctypes.POINTER(RECT),
+            wintypes.LPARAM
+        )
+        
+        # Перечисляем мониторы
+        EnumDisplayMonitors(None, None, MonitorEnumProc(callback), 0)
+        
+        monitor_count = len(monitors)
+        physical_monitors = []
+        
+        for i, hmonitor in enumerate(monitors):
+            monitor_info = MONITORINFOEX()
+            monitor_info.cbSize = ctypes.sizeof(MONITORINFOEX)
+            
+            if GetMonitorInfo(hmonitor, ctypes.byref(monitor_info)):
+                # Получаем дополнительную информацию через DisplayConfig API (только для Windows 10+)
+                try:
+                    # Пытаемся получить "дружественное" имя монитора
+                    from ctypes import POINTER, Structure, byref, c_uint, c_void_p, c_wchar_p
+                    
+                    # Определяем структуры для QueryDisplayConfig
+                    class DISPLAYCONFIG_PATH_INFO(Structure):
+                        pass
+                    class DISPLAYCONFIG_MODE_INFO(Structure):
+                        pass
+                    
+                    # Простой способ: используем EnumDisplayDevices
+                    class DISPLAY_DEVICE(Structure):
+                        _fields_ = [
+                            ("cb", wintypes.DWORD),
+                            ("DeviceName", wintypes.WCHAR * 32),
+                            ("DeviceString", wintypes.WCHAR * 128),
+                            ("StateFlags", wintypes.DWORD),
+                            ("DeviceID", wintypes.WCHAR * 128),
+                            ("DeviceKey", wintypes.WCHAR * 128)
+                        ]
+                    
+                    display_device = DISPLAY_DEVICE()
+                    display_device.cb = ctypes.sizeof(DISPLAY_DEVICE)
+                    
+                    device_name = monitor_info.szDevice
+                    monitor_name = "Неизвестный монитор"
+                    
+                    # Перебираем все устройства дисплея
+                    device_index = 0
+                    while user32.EnumDisplayDevicesW(None, device_index, byref(display_device), 0):
+                        if display_device.DeviceName == device_name:
+                            # Это наш монитор, получаем его "дружественное" имя
+                            monitor_device = DISPLAY_DEVICE()
+                            monitor_device.cb = ctypes.sizeof(DISPLAY_DEVICE)
+                            
+                            if user32.EnumDisplayDevicesW(
+                                display_device.DeviceName, 
+                                0, 
+                                byref(monitor_device), 
+                                0
+                            ):
+                                if monitor_device.DeviceString:
+                                    monitor_name = monitor_device.DeviceString
+                            
+                            break
+                        device_index += 1
+                    
+                except Exception:
+                    # Если не получилось, используем имя устройства
+                    monitor_name = f"Монитор {i+1}"
+                
+                # Проверяем, активен ли монитор (не виртуальный)
+                width = monitor_info.rcMonitor.right - monitor_info.rcMonitor.left
+                height = monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top
+                
+                # Фильтруем виртуальные мониторы (у них обычно маленькое разрешение или они отключены)
+                if width > 0 and height > 0 and width * height > 10000:  # Минимум 100x100 пикселей
+                    physical_monitors.append({
+                        'name': monitor_name,
+                        'width': width,
+                        'height': height,
+                        'device': monitor_info.szDevice
+                    })
+        
+        # Формируем результат
+        if physical_monitors:
+            for i, monitor in enumerate(physical_monitors):
+                info[f'Монитор {i+1}'] = monitor['name']
+                info[f'  Разрешение'] = f"{monitor['width']}x{monitor['height']}"
+                info[f'  Устройство'] = monitor['device']
+        else:
+            info['Информация'] = "Физические мониторы не обнаружены"
+            
+        info['Всего мониторов'] = f"{len(physical_monitors)} физических, {monitor_count} всего"
+        
+    except Exception as e:
+        import traceback
+        info['Ошибка'] = str(e)
+        info['Трассировка'] = traceback.format_exc()
+    
+    return info
+
+
+# Альтернативный вариант с использованием WMI (более простой, но может показывать виртуальные мониторы)
+def get_monitor_info_wmi() -> Dict[str, str]:
+    """Информация о мониторах через WMI с фильтрацией виртуальных"""
+    print("🔍 Получение информации о мониторах через WMI...")
+    info = {}
+    
+    try:
+        import wmi
+        
+        c = wmi.WMI()
+        
+        # Получаем информацию о мониторах
+        monitors = c.Win32_DesktopMonitor()
+        
+        physical_monitors = []
+        for i, monitor in enumerate(monitors):
+            # Фильтруем виртуальные мониторы
+            if (monitor.ScreenWidth and monitor.ScreenHeight and 
+                monitor.ScreenWidth > 0 and monitor.ScreenHeight > 0):
+                
+                name = monitor.Name or monitor.Caption or f"Монитор {i+1}"
+                
+                # Проверяем, не является ли это виртуальным монитором
+                virtual_keywords = ['virtual', 'generic', 'стандартный', 'default']
+                if any(keyword in name.lower() for keyword in virtual_keywords):
+                    continue
+                
+                physical_monitors.append({
+                    'name': name,
+                    'width': monitor.ScreenWidth,
+                    'height': monitor.ScreenHeight,
+                    'pnp_device_id': monitor.PNPDeviceID or 'N/A'
+                })
+        
+        if physical_monitors:
+            for i, monitor in enumerate(physical_monitors):
+                info[f'Монитор {i+1}'] = monitor['name']
+                info[f'  Разрешение'] = f"{monitor['width']}x{monitor['height']}"
+        else:
+            info['Информация'] = "Физические мониторы не обнаружены"
+            
+        info['Всего обнаружено'] = f"{len(physical_monitors)} физических мониторов"
+        
+    except ImportError:
+        info['Ошибка'] = "Установите библиотеку wmi: pip install wmi"
     except Exception as e:
         info['Ошибка'] = str(e)
     
     return info
+
+
+# Самый простой вариант через screeninfo (требует установки библиотеки)
+def get_monitor_info_simple() -> Dict[str, str]:
+    """Информация о мониторах через screeninfo (только физические)"""
+    print("🔍 Получение информации о мониторах через screeninfo...")
+    info = {}
+    
+    try:
+        from screeninfo import get_monitors
+        
+        monitors = get_monitors()
+        
+        if monitors:
+            for i, monitor in enumerate(monitors):
+                if monitor.is_primary:
+                    info[f'Монитор {i+1}'] = f"{monitor.name or 'Безымянный'} (Основной)"
+                else:
+                    info[f'Монитор {i+1}'] = monitor.name or f"Монитор {i+1}"
+                
+                info[f'  Разрешение'] = f"{monitor.width}x{monitor.height}"
+                if monitor.x != 0 or monitor.y != 0:
+                    info[f'  Положение'] = f"({monitor.x}, {monitor.y})"
+        else:
+            info['Информация'] = "Мониторы не обнаружены"
+            
+    except ImportError:
+        info['Ошибка'] = "Установите библиотеку screeninfo: pip install screeninfo"
+    except Exception as e:
+        info['Ошибка'] = str(e)
+    
+    return info
+
+
+# Основная функция, которая выбирает лучший способ
+def get_monitor_info_fixed() -> Dict[str, str]:
+    """Информация о мониторах (использует лучший доступный метод)"""
+    if platform.system() != "Windows":
+        return get_monitor_info_simple()
+    
+    # Пробуем разные методы в порядке предпочтения
+    try:
+        from screeninfo import get_monitors
+        return get_monitor_info_simple()
+    except:
+        try:
+            return get_monitor_info()  # Первый вариант с Windows API
+        except:
+            return get_monitor_info_wmi()  # Вариант с WMI
 
 def get_battery_info() -> Dict[str, str]:
     """Информация о батарее"""

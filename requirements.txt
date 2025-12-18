@@ -1,2 +1,4 @@
 psutil
-win32api
+pythonnet
+screeninfo
+wmi
