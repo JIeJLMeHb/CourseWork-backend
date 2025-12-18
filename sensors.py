@@ -12,7 +12,7 @@ if os.path.exists(libre_hardware_monitor_path):
 try:
     # Try to load LibreHardwareMonitor
     clr.AddReference("LibreHardwareMonitorLib")
-    from LibreHardwareMonitor.Hardware import Computer, SensorType
+    from LibreHardwareMonitor.Hardware import Computer, SensorType # type: ignore
     print("✅ LibreHardwareMonitor loaded successfully")
 except Exception as e:
     print(f"❌ LibreHardwareMonitor loading error: {e}")
